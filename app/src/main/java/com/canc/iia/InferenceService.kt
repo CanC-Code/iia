@@ -2,15 +2,41 @@ package com.canc.iia
 
 import android.app.*
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import kotlinx.coroutines.*
+import kotlin.math.roundToInt
 
 class InferenceService : LifecycleService() {
 
@@ -31,12 +57,9 @@ class InferenceService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        
-        // Check if we should show the overlay
         if (intent?.action == "SHOW_OVERLAY") {
             showFloatingOverlay()
         }
-        
         return START_STICKY
     }
 
@@ -49,23 +72,18 @@ class InferenceService : LifecycleService() {
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
 
-        // Modern Android 15 Foreground Service Type
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID, 
-                notification, 
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
-            )
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
     private fun showFloatingOverlay() {
-        if (overlayView != null) return // Already showing
+        if (overlayView != null) return
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        
+
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -79,21 +97,85 @@ class InferenceService : LifecycleService() {
         }
 
         overlayView = ComposeView(this).apply {
+            // Vital for Compose to work in a Service window
+            setViewTreeLifecycleOwner(this@InferenceService)
+            setViewTreeSavedStateRegistryOwner(this@InferenceService)
+            setViewTreeViewModelStoreOwner(this@InferenceService)
+            
             setContent {
-                // We will create this Composable in a future step
-                // It will be the "Overlay Button" that expands
+                var isExpanded by remember { mutableStateOf(false) }
+                var offsetX by remember { mutableStateOf(0f) }
+                var offsetY by remember { mutableStateOf(0f) }
+
+                Box(modifier = Modifier.padding(8.dp)) {
+                    if (!isExpanded) {
+                        // The Floating Bubble
+                        IconButton(
+                            onClick = { isExpanded = true },
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary)
+                                .pointerInput(Unit) {
+                                    detectDragGestures { change, dragAmount ->
+                                        change.consume()
+                                        offsetX += dragAmount.x
+                                        offsetY += dragAmount.y
+                                        params.x = offsetX.roundToInt()
+                                        params.y = offsetY.roundToInt()
+                                        windowManager?.updateViewLayout(this@apply, params)
+                                    }
+                                }
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "Open AI", tint = Color.White)
+                        }
+                    } else {
+                        // The Expanded Interface
+                        Card(
+                            modifier = Modifier
+                                .width(300.dp)
+                                .wrapContentHeight(),
+                            shape = RoundedCornerShape(16.dp),
+                            elevation = CardDefaults.cardElevation(8.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("IIA Controls", style = MaterialTheme.typography.titleMedium)
+                                    IconButton(onClick = { isExpanded = false }) {
+                                        Icon(Icons.Default.Close, contentDescription = "Minimize")
+                                    }
+                                }
+                                
+                                OutlinedTextField(
+                                    value = "", 
+                                    onValueChange = {}, 
+                                    label = { Text("Prompt") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Button(
+                                    onClick = { /* Trigger NativeLib.txt2img */ },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Generate")
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        
         windowManager?.addView(overlayView, params)
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "AI Generation Service",
-            NotificationManager.IMPORTANCE_LOW
-        )
+        val channel = NotificationChannel(CHANNEL_ID, "AI Generation Service", NotificationManager.IMPORTANCE_LOW)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
     }
@@ -101,14 +183,9 @@ class InferenceService : LifecycleService() {
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
-        NativeLib.freeModel() // Safety: Free C++ memory when service dies
+        NativeLib.freeModel()
         if (overlayView != null) {
             windowManager?.removeView(overlayView)
         }
-    }
-
-    override fun onBind(intent: Intent): IBinder? {
-        super.onBind(intent)
-        return null
     }
 }
