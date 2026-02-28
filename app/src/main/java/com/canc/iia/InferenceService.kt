@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -16,7 +17,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -40,7 +40,6 @@ class InferenceService : LifecycleService() {
     private var windowManager: WindowManager? = null
     private var overlayView: ComposeView? = null
     
-    // Tracks model loading state globally in the service
     private var isModelLoaded = mutableStateOf(false)
     private var isGenerating = mutableStateOf(false)
 
@@ -70,10 +69,13 @@ class InferenceService : LifecycleService() {
                         NativeLib.loadModel(mPath, vPath, threads)
                     }
                     isModelLoaded.value = success
+                    withContext(Dispatchers.Main) {
+                        val msg = if (success) "Engine Ready" else "Engine Load Failed"
+                        Toast.makeText(this@InferenceService, msg, Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }
-        
         return START_STICKY
     }
 
@@ -95,7 +97,6 @@ class InferenceService : LifecycleService() {
 
     private fun showFloatingOverlay() {
         if (overlayView != null) return
-
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         val params = WindowManager.LayoutParams(
@@ -126,7 +127,6 @@ class InferenceService : LifecycleService() {
 
                 Box(modifier = Modifier.padding(8.dp)) {
                     if (!isExpanded) {
-                        // The Floating Bubble
                         Box(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
@@ -153,7 +153,6 @@ class InferenceService : LifecycleService() {
                             }
                         }
                     } else {
-                        // The Expanded Interface
                         Card(
                             modifier = Modifier.width(300.dp).wrapContentHeight(),
                             shape = RoundedCornerShape(16.dp),
@@ -185,22 +184,32 @@ class InferenceService : LifecycleService() {
                                     onClick = { 
                                         isGenerating.value = true
                                         serviceScope.launch {
-                                            // Call the txt2img JNI function
-                                            val result = withContext(Dispatchers.IO) {
+                                            // 1. Run Inference
+                                            val rawPixels = withContext(Dispatchers.IO) {
                                                 NativeLib.txt2img(promptText, "", 7.0f, 320, 320, 15, -1L)
                                             }
-                                            // Handle result (e.g., save to gallery or show in overlay)
+                                            
+                                            // 2. Process Result
+                                            if (rawPixels != null) {
+                                                val bitmap = ImageUtils.decodeRGB(rawPixels, 320, 320)
+                                                val uri = ImageUtils.saveToGallery(this@InferenceService, bitmap)
+                                                
+                                                withContext(Dispatchers.Main) {
+                                                    val statusMsg = if (uri != null) "Image saved to Gallery!" else "Save failed"
+                                                    Toast.makeText(this@InferenceService, statusMsg, Toast.LENGTH_SHORT).show()
+                                                }
+                                            } else {
+                                                withContext(Dispatchers.Main) {
+                                                    Toast.makeText(this@InferenceService, "Generation failed (OOM?)", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
                                             isGenerating.value = false
                                         }
                                     },
                                     modifier = Modifier.fillMaxWidth(),
                                     enabled = loaded && !generating
                                 ) {
-                                    if (generating) {
-                                        Text("Generating...")
-                                    } else {
-                                        Text("Generate Image")
-                                    }
+                                    if (generating) Text("Generating...") else Text("Generate Image")
                                 }
                                 
                                 if (!loaded) {
