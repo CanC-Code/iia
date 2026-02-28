@@ -7,10 +7,7 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
 import android.view.WindowManager
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -19,7 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,7 +25,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
@@ -43,6 +39,10 @@ class InferenceService : LifecycleService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var windowManager: WindowManager? = null
     private var overlayView: ComposeView? = null
+    
+    // Tracks model loading state globally in the service
+    private var isModelLoaded = mutableStateOf(false)
+    private var isGenerating = mutableStateOf(false)
 
     companion object {
         const val CHANNEL_ID = "AI_Inference_Channel"
@@ -57,9 +57,23 @@ class InferenceService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        if (intent?.action == "SHOW_OVERLAY") {
-            showFloatingOverlay()
+        
+        when (intent?.action) {
+            "SHOW_OVERLAY" -> showFloatingOverlay()
+            "LOAD_MODEL" -> {
+                val mPath = intent.getStringExtra("MODEL_PATH") ?: ""
+                val vPath = intent.getStringExtra("VAE_PATH") ?: ""
+                val threads = intent.getIntExtra("THREADS", 4)
+                
+                serviceScope.launch {
+                    val success = withContext(Dispatchers.IO) {
+                        NativeLib.loadModel(mPath, vPath, threads)
+                    }
+                    isModelLoaded.value = success
+                }
+            }
         }
+        
         return START_STICKY
     }
 
@@ -97,25 +111,28 @@ class InferenceService : LifecycleService() {
         }
 
         overlayView = ComposeView(this).apply {
-            // Vital for Compose to work in a Service window
             setViewTreeLifecycleOwner(this@InferenceService)
             setViewTreeSavedStateRegistryOwner(this@InferenceService)
             setViewTreeViewModelStoreOwner(this@InferenceService)
-            
+
             setContent {
                 var isExpanded by remember { mutableStateOf(false) }
                 var offsetX by remember { mutableStateOf(0f) }
                 var offsetY by remember { mutableStateOf(0f) }
+                var promptText by remember { mutableStateOf("") }
+                
+                val loaded by isModelLoaded
+                val generating by isGenerating
 
                 Box(modifier = Modifier.padding(8.dp)) {
                     if (!isExpanded) {
                         // The Floating Bubble
-                        IconButton(
-                            onClick = { isExpanded = true },
+                        Box(
+                            contentAlignment = Alignment.Center,
                             modifier = Modifier
                                 .size(56.dp)
                                 .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary)
+                                .background(if (loaded) MaterialTheme.colorScheme.primary else Color.Gray)
                                 .pointerInput(Unit) {
                                     detectDragGestures { change, dragAmount ->
                                         change.consume()
@@ -127,14 +144,18 @@ class InferenceService : LifecycleService() {
                                     }
                                 }
                         ) {
-                            Icon(Icons.Default.Add, contentDescription = "Open AI", tint = Color.White)
+                            IconButton(onClick = { isExpanded = true }) {
+                                if (generating) {
+                                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                                } else {
+                                    Icon(Icons.Default.Add, contentDescription = "Open", tint = Color.White)
+                                }
+                            }
                         }
                     } else {
                         // The Expanded Interface
                         Card(
-                            modifier = Modifier
-                                .width(300.dp)
-                                .wrapContentHeight(),
+                            modifier = Modifier.width(300.dp).wrapContentHeight(),
                             shape = RoundedCornerShape(16.dp),
                             elevation = CardDefaults.cardElevation(8.dp)
                         ) {
@@ -149,21 +170,41 @@ class InferenceService : LifecycleService() {
                                         Icon(Icons.Default.Close, contentDescription = "Minimize")
                                     }
                                 }
-                                
+
                                 OutlinedTextField(
-                                    value = "", 
-                                    onValueChange = {}, 
+                                    value = promptText,
+                                    onValueChange = { promptText = it },
                                     label = { Text("Prompt") },
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier.fillMaxWidth(),
+                                    enabled = !generating
                                 )
 
-                                Spacer(modifier = Modifier.height(8.dp))
+                                Spacer(modifier = Modifier.height(12.dp))
 
                                 Button(
-                                    onClick = { /* Trigger NativeLib.txt2img */ },
-                                    modifier = Modifier.fillMaxWidth()
+                                    onClick = { 
+                                        isGenerating.value = true
+                                        serviceScope.launch {
+                                            // Call the txt2img JNI function
+                                            val result = withContext(Dispatchers.IO) {
+                                                NativeLib.txt2img(promptText, "", 7.0f, 320, 320, 15, -1L)
+                                            }
+                                            // Handle result (e.g., save to gallery or show in overlay)
+                                            isGenerating.value = false
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    enabled = loaded && !generating
                                 ) {
-                                    Text("Generate")
+                                    if (generating) {
+                                        Text("Generating...")
+                                    } else {
+                                        Text("Generate Image")
+                                    }
+                                }
+                                
+                                if (!loaded) {
+                                    Text("Model not loaded", color = Color.Red, style = MaterialTheme.typography.labelSmall)
                                 }
                             }
                         }
@@ -187,5 +228,10 @@ class InferenceService : LifecycleService() {
         if (overlayView != null) {
             windowManager?.removeView(overlayView)
         }
+    }
+
+    override fun onBind(intent: Intent): IBinder? {
+        super.onBind(intent)
+        return null
     }
 }
